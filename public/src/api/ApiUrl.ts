@@ -9,5 +9,7 @@ export enum ApiUrl {
   Goto = '/api/goto',
   Render = '/api/render',
   Spawn = '/api/spawn',
-  File = '/api/file'
+  File = '/api/file',
+  NestedJson = '/api/nestedJson',
+  Partners = '/api/partners'
 }

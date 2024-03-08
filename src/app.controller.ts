@@ -5,6 +5,7 @@ import {
   Get,
   Header,
   HttpException,
+  InternalServerErrorException,
   Logger,
   Options,
   Param,
@@ -14,8 +15,10 @@ import {
   SerializeOptions,
   UseGuards,
   UseInterceptors,
+  ParseIntPipe,
+  DefaultValuePipe,
+  HttpStatus,
 } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import {
   ApiBody,
   ApiConsumes,
@@ -25,26 +28,26 @@ import {
   ApiOkResponse,
   ApiOperation,
   ApiProduces,
+  ApiQuery,
   ApiTags,
 } from '@nestjs/swagger';
-import { spawn } from 'child_process';
 import * as dotT from 'dot';
 import { parseXml } from 'libxmljs';
 import { AppConfig } from './app.config.api';
-import { AppModuleConfigProperties } from './app.module.config.properties';
-import { OrmModuleConfigProperties } from './orm/orm.module.config.properties';
 import {
-  SWAGGER_DESC_CONFIG_SERVER,
-  SWAGGER_DESC_LAUNCH_COMMAND,
-  SWAGGER_DESC_OPTIONS_REQUEST,
-  SWAGGER_DESC_REDIRECT_REQUEST,
-  SWAGGER_DESC_RENDER_REQUEST,
-  SWAGGER_DESC_XML_METADATA,
+  API_DESC_CONFIG_SERVER,
+  API_DESC_LAUNCH_COMMAND,
+  API_DESC_OPTIONS_REQUEST,
+  API_DESC_REDIRECT_REQUEST,
+  API_DESC_RENDER_REQUEST,
+  API_DESC_XML_METADATA,
+  SWAGGER_DESC_SECRETS,
+  SWAGGER_DESC_NESTED_JSON,
 } from './app.controller.swagger.desc';
-import { UsersService } from './users/users.service';
 import { AuthGuard } from './auth/auth.guard';
 import { JwtType } from './auth/jwt/jwt.type.decorator';
 import { JwtProcessorType } from './auth/auth.service';
+import { AppService } from './app.service';
 import { BASIC_USER_INFO, UserDto } from './users/api/UserDto';
 import { SWAGGER_DESC_FIND_USER } from './users/users.controller.swagger.desc';
 
@@ -53,16 +56,13 @@ import { SWAGGER_DESC_FIND_USER } from './users/users.controller.swagger.desc';
 export class AppController {
   private readonly logger = new Logger(AppController.name);
 
-  constructor(
-    private readonly configService: ConfigService,
-    private readonly userService: UsersService,
-  ) {}
+  constructor(private readonly appService: AppService) { }
 
   @Post('render')
   @ApiProduces('text/plain')
   @ApiConsumes('text/plain')
   @ApiOperation({
-    description: SWAGGER_DESC_RENDER_REQUEST,
+    description: API_DESC_RENDER_REQUEST,
   })
   @ApiBody({ description: 'Write your text here' })
   @ApiCreatedResponse({
@@ -78,8 +78,9 @@ export class AppController {
   }
 
   @Get('goto')
+  @ApiQuery({ name: 'url', example: 'https://google.com', required: true })
   @ApiOperation({
-    description: SWAGGER_DESC_REDIRECT_REQUEST,
+    description: API_DESC_REDIRECT_REQUEST,
   })
   @ApiOkResponse({
     description: 'Redirected',
@@ -90,8 +91,19 @@ export class AppController {
   }
 
   @Post('metadata')
+  @ApiProduces('text/plain')
+  @ApiConsumes('text/plain')
+  @ApiBody({
+    type: String,
+    examples: {
+      xml_doc: {
+        summary: 'XML doc',
+        value: `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 915 585"><g stroke-width="3.45" fill="none"><path stroke="#000" d="M11.8 11.8h411v411l-411 .01v-411z"/><path stroke="#448" d="M489 11.7h415v411H489v-411z"/></g></svg>`,
+      },
+    },
+  })
   @ApiOperation({
-    description: SWAGGER_DESC_XML_METADATA,
+    description: API_DESC_XML_METADATA,
   })
   @ApiInternalServerErrorResponse({
     description: 'Invalid data',
@@ -117,7 +129,7 @@ export class AppController {
 
   @Options()
   @ApiOperation({
-    description: SWAGGER_DESC_OPTIONS_REQUEST,
+    description: API_DESC_OPTIONS_REQUEST,
   })
   @Header('allow', 'OPTIONS, GET, HEAD, POST')
   async getTestOptions(): Promise<void> {
@@ -125,8 +137,9 @@ export class AppController {
   }
 
   @Get('spawn')
+  @ApiQuery({ name: 'command', example: 'ls -la', required: true })
   @ApiOperation({
-    description: SWAGGER_DESC_LAUNCH_COMMAND,
+    description: API_DESC_LAUNCH_COMMAND,
   })
   @ApiOkResponse({
     type: String,
@@ -137,38 +150,21 @@ export class AppController {
       properties: { location: { type: 'string' } },
     },
   })
-  async launchCommand(@Query('command') command: string): Promise<string> {
+  async getCommandResult(@Query('command') command: string): Promise<string> {
     this.logger.debug(`launch ${command} command`);
-
-    return new Promise((res, rej) => {
-      try {
-        const [exec, ...args] = command.split(' ');
-        const ps = spawn(exec, args);
-
-        ps.stdout.on('data', (data: Buffer) => {
-          this.logger.debug(`stdout: ${data}`);
-          res(data.toString('ascii'));
-        });
-
-        ps.stderr.on('data', (data: Buffer) => {
-          this.logger.debug(`stderr: ${data}`);
-          res(data.toString('ascii'));
-        });
-
-        ps.on('error', (err) => rej(err.message));
-
-        ps.on('close', (code) =>
-          this.logger.debug(`child process exited with code ${code}`),
-        );
-      } catch (err) {
-        rej(err.message);
-      }
-    });
+    try {
+      return await this.appService.launchCommand(command);
+    } catch (err) {
+      throw new InternalServerErrorException({
+        error: err.message || err,
+        location: __filename,
+      });
+    }
   }
 
   @Get('/config')
   @ApiOperation({
-    description: SWAGGER_DESC_CONFIG_SERVER,
+    description: API_DESC_CONFIG_SERVER,
   })
   @ApiOkResponse({
     type: AppConfig,
@@ -176,33 +172,44 @@ export class AppController {
   })
   getConfig(): AppConfig {
     this.logger.debug('Called getConfig');
-    const dbSchema = this.configService.get<string>(
-      OrmModuleConfigProperties.ENV_DATABASE_SCHEMA,
-    );
-    const dbHost = this.configService.get<string>(
-      OrmModuleConfigProperties.ENV_DATABASE_HOST,
-    );
-    const dbPort = this.configService.get<string>(
-      OrmModuleConfigProperties.ENV_DATABASE_PORT,
-    );
-    const dbUser = this.configService.get<string>(
-      OrmModuleConfigProperties.ENV_DATABASE_USER,
-    );
-    const dbPwd = this.configService.get<string>(
-      OrmModuleConfigProperties.ENV_DATABASE_PASSWORD,
-    );
-    return {
-      awsBucket: this.configService.get<string>(
-        AppModuleConfigProperties.ENV_AWS_BUCKET,
-      ),
-      sql: `postgres://${dbUser}:${dbPwd}@${dbHost}:${dbPort}/${dbSchema} `,
-      googlemaps: this.configService.get<string>(
-        AppModuleConfigProperties.ENV_GOOGLE_MAPS,
-      ),
+    const config = this.appService.getConfig();
+    return config;
+  }
+
+  @Get('/secrets')
+  @ApiOperation({
+    description: SWAGGER_DESC_SECRETS,
+  })
+  @ApiOkResponse({
+    type: Object,
+    status: 200,
+  })
+  getSecrets(): Object {
+    const secrets = {
+      codeclimate:
+        'CODECLIMATE_REPO_TOKEN=62864c476ade6ab9d10d0ce0901ae2c211924852a28c5f960ae5165c1fdfec73',
+      facebook:
+        'EAACEdEose0cBAHyDF5HI5o2auPWv3lPP3zNYuWWpjMrSaIhtSvX73lsLOcas5k8GhC5HgOXnbF3rXRTczOpsbNb54CQL8LcQEMhZAWAJzI0AzmL23hZByFAia5avB6Q4Xv4u2QVoAdH0mcJhYTFRpyJKIAyDKUEBzz0GgZDZD',
+      google_b64: 'QUl6YhT6QXlEQnbTr2dSdEI1W7yL2mFCX3c4PPP5NlpkWE65NkZV',
+      google_oauth:
+        '188968487735-c7hh7k87juef6vv84697sinju2bet7gn.apps.googleusercontent.com',
+      google_oauth_token:
+        'ya29.a0TgU6SMDItdQQ9J7j3FVgJuByTTevl0FThTEkBs4pA4-9tFREyf2cfcL-_JU6Trg1O0NWwQKie4uGTrs35kmKlxohWgcAl8cg9DTxRx-UXFS-S1VYPLVtQLGYyNTfGp054Ad3ej73-FIHz3RZY43lcKSorbZEY4BI',
+      heroku:
+        'herokudev.staging.endosome.975138 pid=48751 request_id=0e9a8698-a4d2-4925-a1a5-113234af5f60',
+      hockey_app: 'HockeySDK: 203d3af93f4a218bfb528de08ae5d30ff65e1cf',
+      outlook:
+        'https://outlook.office.com/webhook/7dd49fc6-1975-443d-806c-08ebe8f81146@a532313f-11ec-43a2-9a7a-d2e27f4f3478/IncomingWebhook/8436f62b50ab41b3b93ba1c0a50a0b88/eff4cd58-1bb8-4899-94de-795f656b4a18',
+      paypal:
+        'access_token$production$x0lb4r69dvmmnufd$3ea7cb281754b7da7dac131ef5783321',
+      slack:
+        'xoxo-175588824543-175748345725-176608801663-826315f84e553d482bb7e73e8322sdf3',
     };
+    return secrets;
   }
 
   @Get('/v1/userinfo/:email')
+  @ApiQuery({ name: 'email', example: 'john.doe@example.com', required: true })
   @UseInterceptors(ClassSerializerInterceptor)
   @SerializeOptions({ groups: [BASIC_USER_INFO] })
   @ApiOperation({
@@ -224,14 +231,14 @@ export class AppController {
   })
   async getUserInfo(@Param('email') email: string): Promise<UserDto> {
     try {
-      this.logger.debug(`Find a user by email: ${email}`);
-      return new UserDto(await this.userService.findByEmail(email));
+      return await this.appService.getUserInfo(email);
     } catch (err) {
       throw new HttpException(err.message, err.status);
     }
   }
 
   @Get('/v2/userinfo/:email')
+  @ApiQuery({ name: 'email', example: 'john.doe@example.com', required: true })
   @UseGuards(AuthGuard)
   @JwtType(JwtProcessorType.RSA)
   @UseInterceptors(ClassSerializerInterceptor)
@@ -255,10 +262,32 @@ export class AppController {
   })
   async getUserInfoV2(@Param('email') email: string): Promise<UserDto> {
     try {
-      this.logger.debug(`Find a user by email: ${email}`);
-      return new UserDto(await this.userService.findByEmail(email));
+      return await this.appService.getUserInfo(email);
     } catch (err) {
       throw new HttpException(err.message, err.status);
     }
+  }
+
+  @Get('nestedJson')
+  @ApiOperation({
+    description: SWAGGER_DESC_NESTED_JSON,
+  })
+  @Header('content-type', 'application/json')
+  async getNestedJson(@Query('depth', new DefaultValuePipe(1), new ParseIntPipe({ errorHttpStatusCode: HttpStatus.BAD_REQUEST })) depth: number): Promise<string> {
+    if (depth < 1) {
+      throw new HttpException("JSON nesting depth is invalid", HttpStatus.BAD_REQUEST);
+    }
+
+    this.logger.debug(`Creating a JSON with a nesting depth of ${depth}`);
+
+    var tmpObj: object = {};
+    var jsonObj: object = { "0": "Leaf" };
+    for (let i = 1; i < depth; i++) {
+      tmpObj = {};
+      tmpObj[i.toString()] = Object.assign({}, jsonObj);
+      jsonObj = Object.assign({}, tmpObj);
+    }
+
+    return JSON.stringify(jsonObj);
   }
 }

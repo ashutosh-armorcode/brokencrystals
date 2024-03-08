@@ -2,6 +2,7 @@ import {
   Body,
   ClassSerializerInterceptor,
   Controller,
+  Delete,
   ForbiddenException,
   Get,
   Header,
@@ -18,6 +19,7 @@ import {
   Req,
   Res,
   SerializeOptions,
+  UnauthorizedException,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
@@ -29,13 +31,14 @@ import {
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
+  ApiQuery,
   ApiTags,
+  ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
-import { CreateUserRequest } from './api/CreateUserRequest';
+import { CreateUserRequest, SignupMode } from './api/CreateUserRequest';
 import { UserDto } from './api/UserDto';
 import { LdapQueryHandler } from './ldap.query.handler';
 import { UsersService } from './users.service';
-import { Readable } from 'stream';
 import { User } from '../model/user.entity';
 import { AuthGuard } from '../auth/auth.guard';
 import { JwtType } from '../auth/jwt/jwt.type.decorator';
@@ -55,10 +58,12 @@ import {
   SWAGGER_DESC_ADMIN_RIGHTS,
   SWAGGER_DESC_FIND_USERS,
   SWAGGER_DESC_FIND_FULL_USER_INFO,
+  SWAGGER_DESC_DELETE_PHOTO_USER_BY_ID,
 } from './users.controller.swagger.desc';
 import { AdminGuard } from './users.guard';
 import { PermissionDto } from './api/PermissionDto';
 import { BASIC_USER_INFO, FULL_USER_INFO } from './api/UserDto';
+import { parseXml } from 'libxmljs';
 
 @Controller('/api/users')
 @UseInterceptors(ClassSerializerInterceptor)
@@ -82,6 +87,7 @@ export class UsersController {
   }
 
   @Get('/one/:email')
+  @ApiQuery({ name: 'email', example: 'john.doe@example.com', required: true })
   @SerializeOptions({ groups: [BASIC_USER_INFO] })
   @ApiOperation({
     description: SWAGGER_DESC_FIND_USER,
@@ -110,6 +116,7 @@ export class UsersController {
   }
 
   @Get('/id/:id')
+  @ApiQuery({ name: 'id', example: 1, required: true })
   @SerializeOptions({ groups: [BASIC_USER_INFO] })
   @ApiOperation({
     description: SWAGGER_DESC_FIND_USER,
@@ -138,6 +145,7 @@ export class UsersController {
   }
 
   @Get('/fullinfo/:email')
+  @ApiQuery({ name: 'email', example: 'john.doe@example.com', required: true })
   @SerializeOptions({ groups: [FULL_USER_INFO] })
   @ApiOperation({
     description: SWAGGER_DESC_FIND_FULL_USER_INFO,
@@ -166,6 +174,7 @@ export class UsersController {
   }
 
   @Get('/search/:name')
+  @ApiQuery({ name: 'name', example: 'john', required: true })
   @SerializeOptions({ groups: [FULL_USER_INFO] })
   @ApiOperation({
     description: SWAGGER_DESC_FIND_USERS,
@@ -185,6 +194,7 @@ export class UsersController {
   }
 
   @Get('/one/:email/photo')
+  @ApiQuery({ name: 'email', example: 'john.doe@example.com', required: true })
   @UseGuards(AuthGuard)
   @JwtType(JwtProcessorType.RSA)
   @ApiOperation({
@@ -218,14 +228,7 @@ export class UsersController {
     }
 
     try {
-      const readable = new Readable({
-        read() {
-          this.push(user.photo);
-          this.push(null);
-        },
-      });
-      res.type('image/png');
-      return readable;
+      return user.photo;
     } catch (err) {
       throw new InternalServerErrorException({
         error: err.message,
@@ -234,7 +237,55 @@ export class UsersController {
     }
   }
 
+  @Delete('/one/:id/photo')
+  @ApiQuery({ name: 'id', example: 1, required: true })
+  @UseGuards(AuthGuard)
+  @JwtType(JwtProcessorType.RSA)
+  @ApiOperation({
+    description: SWAGGER_DESC_DELETE_PHOTO_USER_BY_ID,
+  })
+  @ApiOkResponse({
+    description: 'Deletes user profile photo',
+  })
+  @ApiNoContentResponse({
+    description: 'Returns empty content if there was no user profile photo',
+  })
+  @ApiForbiddenResponse({
+    description: 'Returns when user is not authenticated',
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Returns when isAdmin is false',
+  })
+  async deleteUserPhotoById(
+    @Param('id') id: number,
+    @Query('isAdmin') isAdminParam: string,
+    @Res({ passthrough: true }) res: FastifyReply,
+  ) {
+    isAdminParam = isAdminParam.toLowerCase();
+    const isAdmin =
+      isAdminParam === 'true' || isAdminParam === '1' ? true : false;
+    if (!isAdmin) {
+      throw new UnauthorizedException();
+    }
+
+    const user = await this.usersService.findById(id);
+    if (!user) {
+      throw new NotFoundException({
+        error: 'Could not file user',
+        location: __filename,
+      });
+    }
+
+    await this.usersService.deletePhoto(id);
+  }
+
   @Get('/ldap')
+  @ApiQuery({
+    name: 'query',
+    example:
+      '(&(objectClass=person)(objectClass=user)(email=john.doe@example.com))',
+    required: true,
+  })
   @ApiOperation({
     description: SWAGGER_DESC_LDAP_SEARCH,
   })
@@ -295,17 +346,18 @@ export class UsersController {
     try {
       this.logger.debug(`Create a basic user: ${user}`);
 
-      const userExists = await this.usersService.findByEmail(user.email);
+      const userExists = await this.doesUserExist(user);
       if (userExists) {
-        throw new HttpException('User already exists', 409);
+        throw new HttpException('User already exists', HttpStatus.CONFLICT);
       }
+
+      return new UserDto(
+        await this.usersService.createUser(user, user.op === SignupMode.BASIC),
+      );
     } catch (err) {
-      if (err.status === 404) {
-        return new UserDto(await this.usersService.createUser(user));
-      }
       throw new HttpException(
         err.message ?? 'Something went wrong',
-        err.status ?? 500,
+        err.status ?? HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }
   }
@@ -330,7 +382,13 @@ export class UsersController {
     try {
       this.logger.debug(`Create a OIDC user: ${user}`);
 
-      return new UserDto(
+      const userExists = await this.doesUserExist(user);
+
+      if (userExists) {
+        throw new HttpException('User already exists', HttpStatus.CONFLICT);
+      }
+
+      const keycloakUser = new UserDto(
         await this.keyCloakService.registerUser({
           email: user.email,
           firstName: user.firstName,
@@ -338,6 +396,10 @@ export class UsersController {
           password: user.password,
         }),
       );
+
+      this.createUser(user);
+
+      return keycloakUser;
     } catch (err) {
       throw new HttpException(
         err.response.data ?? 'Something went wrong',
@@ -347,6 +409,7 @@ export class UsersController {
   }
 
   @Put('/one/:email/info')
+  @ApiQuery({ name: 'email', example: 'john.doe@example.com', required: true })
   @UseGuards(AuthGuard)
   @JwtType(JwtProcessorType.RSA)
   @ApiOperation({
@@ -389,6 +452,7 @@ export class UsersController {
   }
 
   @Get('/one/:email/info')
+  @ApiQuery({ name: 'email', example: 'john.doe@example.com', required: true })
   @UseGuards(AuthGuard)
   @JwtType(JwtProcessorType.RSA)
   @ApiOperation({
@@ -432,6 +496,7 @@ export class UsersController {
   }
 
   @Get('/one/:email/adminpermission')
+  @ApiQuery({ name: 'email', example: 'john.doe@example.com', required: true })
   @UseGuards(AuthGuard, AdminGuard)
   @JwtType(JwtProcessorType.RSA)
   @ApiOperation({
@@ -455,6 +520,7 @@ export class UsersController {
   }
 
   @Put('/one/:email/photo')
+  @ApiQuery({ name: 'email', example: 'john.doe@example.com', required: true })
   @UseGuards(AuthGuard)
   @JwtType(JwtProcessorType.RSA)
   @ApiOperation({
@@ -467,7 +533,27 @@ export class UsersController {
   async uploadFile(@Param('email') email: string, @Req() req: FastifyRequest) {
     try {
       const file = await req.file();
-      await this.usersService.updatePhoto(email, await file.toBuffer());
+      const file_name = file.filename;
+      const file_buffer = await file.toBuffer();
+
+      if (file_name.endsWith('.svg')) {
+        const xml = file_buffer.toString();
+        const xmlDoc = parseXml(xml, {
+          dtdload: true,
+          noent: true,
+          doctype: true,
+          dtdvalid: true,
+          errors: true,
+          recover: true,
+        });
+        await this.usersService.updatePhoto(
+          email,
+          Buffer.from(xmlDoc.toString(), 'utf8'),
+        );
+        return xmlDoc.toString(true);
+      } else {
+        await this.usersService.updatePhoto(email, file_buffer);
+      }
     } catch (err) {
       throw new InternalServerErrorException({
         error: err.message,
@@ -483,5 +569,22 @@ export class UsersController {
         'base64',
       ).toString(),
     ).user;
+  }
+
+  private async doesUserExist(user: UserDto): Promise<boolean> {
+    try {
+      const userExists = await this.usersService.findByEmail(user.email);
+      if (userExists) {
+        return true;
+      }
+    } catch (err) {
+      if (err.status === HttpStatus.NOT_FOUND) {
+        return false;
+      }
+      throw new HttpException(
+        err.message ?? 'Something went wrong',
+        err.status ?? HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
   }
 }

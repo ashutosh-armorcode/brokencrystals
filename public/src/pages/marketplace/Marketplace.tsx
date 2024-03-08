@@ -9,11 +9,18 @@ import {
 import Header from '../main/Header/Header';
 import Testimonials from './Testimonials/Testimonials';
 import ProductView from './ProductView';
+import Partners from './Partners/Partners';
 
 interface Props {
   preview: boolean;
 }
 const path = process.env.NODE_ENV === 'production' ? '/home/node/' : '';
+
+const extractVideoUrlParam = (): string | null => {
+  const { searchParams } = new URL(window.location.href);
+  const videoSrc = searchParams.get('videosrc');
+  return videoSrc;
+};
 
 export const Marketplace: FC<Props> = (props: Props) => {
   const [products, setProducts] = useState<Array<Product>>([]);
@@ -47,8 +54,21 @@ export const Marketplace: FC<Props> = (props: Props) => {
       : getProducts().then((data) => setProducts(data));
   }, []);
 
+  useEffect(() => {
+    const videoElement = document.getElementById('testimonials-video');
+    let videoSrc = extractVideoUrlParam();
+    videoSrc =
+      videoSrc ||
+      'https://www.youtube-nocookie.com/embed/MPYlxeG-8_w?controls=0';
+    if (videoElement) {
+      videoElement.outerHTML = `<iframe width="560" height="315" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" ${
+        videoSrc && 'src="' + videoSrc
+      }"></iframe>`;
+    }
+  }, []);
+
   return (
-    <>
+    <section>
       {props.preview || <Header onInnerPage={true} />}
 
       <section id="marketplace" className="portfolio">
@@ -85,6 +105,7 @@ export const Marketplace: FC<Props> = (props: Props) => {
           </div>
         )}
       </section>
+      <Partners />
       <Testimonials preview={props.preview} />
       <section id="feedback" className="testimonials section-bg">
         <div className="container" data-aos="fade-up">
@@ -119,7 +140,22 @@ export const Marketplace: FC<Props> = (props: Props) => {
           </div>
         </div>
       </section>
-    </>
+      {props.preview || (
+        <section id="video" className="testimonials section-bg">
+          <div
+            className="container d-flex justify-content-center"
+            data-aos="fade-up"
+          >
+            <iframe
+              width="560"
+              height="315"
+              id="testimonials-video"
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+            ></iframe>
+          </div>
+        </section>
+      )}
+    </section>
   );
 };
 

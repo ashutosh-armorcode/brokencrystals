@@ -1,6 +1,11 @@
 import React, { FormEvent, useEffect, useState } from 'react';
 import { Redirect } from 'react-router';
-import { getUserData, putUserData } from '../../api/httpClient';
+import {
+  getAdminStatus,
+  getUserDataById,
+  putUserData,
+  removeUserPhotoById
+} from '../../api/httpClient';
 import { UserData } from '../../interfaces/User';
 import { RoutePath } from '../../router/RoutePath';
 import AuthLayout from '../auth/AuthLayout';
@@ -14,9 +19,13 @@ const defaultUserData: UserData = {
 };
 
 export const Userprofile = () => {
-  const email: string | null =
+  const user_email: string | null =
     sessionStorage.getItem('email') || localStorage.getItem('email');
+  const user_id: string | null =
+    sessionStorage.getItem('user_id') || localStorage.getItem('user_id');
+
   const [user, setUser] = useState<UserData>(defaultUserData);
+  const [isAdmin, setIsAdmin] = useState<boolean>(false);
 
   const onInput = ({ target }: { target: EventTarget | null }) => {
     const { name, value } = target as HTMLInputElement;
@@ -24,8 +33,9 @@ export const Userprofile = () => {
   };
 
   useEffect(() => {
-    if (email) {
-      getUserData(email).then((data) => setUser(data));
+    if (user_email && user_id) {
+      getUserDataById(user_id).then((data) => setUser(data));
+      getAdminStatus(user_email).then((data) => setIsAdmin(!!data.isAdmin));
     }
   }, []);
 
@@ -46,7 +56,7 @@ export const Userprofile = () => {
 
   return (
     <>
-      {email ? (
+      {user_email && user_id ? (
         <AuthLayout>
           <div className="login-form">
             <form onSubmit={sendUserData}>
@@ -90,6 +100,14 @@ export const Userprofile = () => {
                 Save changes
               </button>
             </form>
+            <div>
+              <button
+                className="au-btn au-btn--block au-btn--blue m-b-20"
+                onClick={() => removeUserPhotoById(user.id, isAdmin)}
+              >
+                Remove user profile photo
+              </button>
+            </div>
           </div>
         </AuthLayout>
       ) : (

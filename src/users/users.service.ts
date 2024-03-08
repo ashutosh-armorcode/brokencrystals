@@ -23,7 +23,7 @@ export class UsersService {
     private readonly usersRepository: EntityRepository<User>,
   ) {}
 
-  async createUser(user: UserDto): Promise<User> {
+  async createUser(user: UserDto, isBasicUser: boolean = true): Promise<User> {
     this.log.debug(`Called createUser`);
 
     const u = new User();
@@ -35,6 +35,7 @@ export class UsersService {
     u.cardNumber = user.cardNumber;
     u.phoneNumber = user.phoneNumber;
     u.password = await hashPassword(user.password);
+    u.isBasic = isBasicUser;
 
     await this.usersRepository.persistAndFlush(u);
     this.log.debug(`Saved new user`);
@@ -50,6 +51,18 @@ export class UsersService {
     wrap(user).assign({
       photo,
     });
+
+    await this.usersRepository.persistAndFlush(user);
+    return user;
+  }
+
+  async deletePhoto(id: number): Promise<User> {
+    this.log.debug(`deletePhoto for user with id ${id}`);
+    const user = await this.findById(id);
+    if (!user) {
+      throw new NotFoundError('Could not find user');
+    }
+    delete user.photo;
 
     await this.usersRepository.persistAndFlush(user);
     return user;
@@ -93,7 +106,8 @@ export class UsersService {
 
   async searchByName(query: string, limit?: number): Promise<User[]> {
     this.log.debug(`Called searchUsersByName`);
-    return this.usersRepository.find({
+    return this.usersRepository.find(
+      {
         firstName: { $like: query + '%' },
       },
       limit ? { limit } : {},
