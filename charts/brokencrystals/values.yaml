@@ -1,7 +1,12 @@
 ingress:
-  url: k3s.brokencrystals.nexploit.app
+  url:
   cert: ""
   authlevel: "."
 images: 
   main: stable
   client: stable
+repeaterImageTag: ""
+repeaterID: ""
+token: ""
+cluster: ""
+timeout: ""
